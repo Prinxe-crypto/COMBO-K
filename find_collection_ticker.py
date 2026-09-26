@@ -1,4 +1,4 @@
-⁷"""
+"""
 find_collection_ticker.py
 --------------------------
 RUN THIS ONCE, MANUALLY, to find the exact "collection ticker" name for
