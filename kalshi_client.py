@@ -198,4 +198,38 @@ class KalshiClient:
         waited = 0
         poll_step = 1
         while waited < config.RFQ_MAX_WAIT_SECONDS:
-            quotes = self.get_rfq_quotes(r
+            quotes = self.get_rfq_quotes(rfq_id)
+            if quotes:
+                best = min(
+                    quotes,
+                    key=lambda q: q.get(f"{side}_bid", 999) if q.get(f"{side}_bid", 0) > 0 else 999,
+                )
+                price_cents = best.get(f"{side}_bid", 0)
+                if price_cents > 0:
+                    return {
+                        "status": "quoted",
+                        "price": price_cents / 100.0,
+                        "rfq_id": rfq_id,
+                        "quote_id": best.get("quote_id"),
+                    }
+            time.sleep(poll_step)
+            waited += poll_step
+
+        return {"status": "no_quote", "rfq_id": rfq_id}
+
+    def try_accept_and_confirm(self, rfq_id: str, quote_id: str, side: str) -> str:
+        """
+        Attempts to accept a quote and waits to see if the maker confirms.
+        Returns one of: "confirmed", "void"
+        (In paper mode we never actually want the real fill to matter --
+        we just want to know whether it WOULD have confirmed, for logging.)
+        """
+        self.accept_quote(rfq_id, quote_id, side)
+        waited = 0
+        while waited < config.RFQ_CONFIRM_WAIT_SECONDS:
+            status = self.confirm_quote_status(rfq_id, quote_id)
+            if status.get("status") == "confirmed":
+                return "confirmed"
+            time.sleep(0.5)
+            waited += 0.5
+        return "void"
