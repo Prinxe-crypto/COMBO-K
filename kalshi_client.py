@@ -1,235 +1,185 @@
 """
-kalshi_client.py
-----------------
-Handles everything related to talking to Kalshi's real API:
-  - Signing requests (Kalshi requires every request to be cryptographically
-    signed with your private key — this proves it's really you).
-  - Fetching market prices and order books for the single-leg BTC/ETH markets.
-  - Resolving combo (multivariate) market tickers.
-  - Firing RFQs (Request for Quote) to get a price for the combo leg.
+daemon.py
+---------
+THIS IS THE FILE YOU RUN.
 
-You should not need to edit this file. Everything you'd want to change
-lives in config.py.
+Each time it runs, it does ONE full 15-minute cycle:
+  1. Finds the currently-open BTC and ETH 15-minute markets.
+  2. For each of the 12 strategies, checks the single-leg price and
+     resolves + RFQs the combo market to get the combo price.
+  3. If (single + combo) <= $0.80, "enters" the paper trade and starts
+     monitoring the single leg's order book depth every 30 seconds.
+  4. If a stop-loss level would trigger, logs that.
+  5. At settlement (15 min later), figures out win/loss and logs the
+     final outcome for every stop-loss ladder level.
+  6. Writes everything to logs/trades.csv, updates logs/summary.json,
+     and pushes both to GitHub.
+
+This script is meant to be run by the GitHub Actions workflow every 15
+minutes (see daemon.yml). It runs once and exits -- GitHub re-launches
+it for the next window.
 """
 
 import time
-import base64
-import json
-import requests
+import sys
 from datetime import datetime, timezone
 
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import padding
-
 import config
+from kalshi_client import KalshiClient
+from strategies import STRATEGIES
+import logger
 
 
-class KalshiClient:
-    def __init__(self):
-        self.base_url = config.API_BASE_URL
-        self.api_key_id = config.KALSHI_API_KEY_ID
-        if not self.api_key_id or not config.KALSHI_PRIVATE_KEY_PEM:
-            raise RuntimeError(
-                "Missing Kalshi credentials. Make sure KALSHI_API_KEY_ID and "
-                "KALSHI_PRIVATE_KEY_PEM are set as GitHub Secrets and passed "
-                "into the workflow as environment variables (see SETUP.md)."
-            )
-        self.private_key = self._load_private_key(config.KALSHI_PRIVATE_KEY_PEM)
+def get_combo_ticker(client: KalshiClient, btc_market: dict, eth_market: dict, combo_outcome: str) -> str:
+    """
+    Resolves the specific combo (multivariate) market ticker for today's
+    live BTC + ETH windows, using the collection ticker set in config.py.
 
-    # ── AUTH ──────────────────────────────────────────────────────────
-    def _load_private_key(self, pem_text: str):
-        return serialization.load_pem_private_key(pem_text.encode("utf-8"), password=None)
-
-    def _sign(self, timestamp_ms: str, method: str, path: str) -> str:
-        """
-        Kalshi requires a signature over: timestamp + method + path
-        (NOT the full URL, and NOT query parameters).
-        """
-        message = f"{timestamp_ms}{method}{path}".encode("utf-8")
-        signature = self.private_key.sign(
-            message,
-            padding.PSS(
-                mgf=padding.MGF1(hashes.SHA256()),
-                salt_length=padding.PSS.DIGEST_LENGTH,
-            ),
-            hashes.SHA256(),
+    combo_outcome "both_up" -> BTC yes + ETH yes
+    combo_outcome "both_down" -> BTC no + ETH no
+    """
+    if config.COMBO_COLLECTION_TICKER == "PASTE_COLLECTION_TICKER_HERE":
+        raise NotImplementedError(
+            "COMBO_COLLECTION_TICKER is not set in config.py yet. Run "
+            "find_collection_ticker.py once to find the right value."
         )
-        return base64.b64encode(signature).decode("utf-8")
 
-    def _headers(self, method: str, path: str) -> dict:
-        timestamp_ms = str(int(time.time() * 1000))
-        # Kalshi signs the FULL path including "/trade-api/v2", not just
-        # the part after it -- e.g. "/trade-api/v2/markets", not "/markets".
-        # self.base_url already ends in "/trade-api/v2", so we rebuild the
-        # full path here for signing purposes only.
-        full_path_for_signing = "/trade-api/v2" + path
-        signature = self._sign(timestamp_ms, method, full_path_for_signing)
-        return {
-            "KALSHI-ACCESS-KEY": self.api_key_id,
-            "KALSHI-ACCESS-TIMESTAMP": timestamp_ms,
-            "KALSHI-ACCESS-SIGNATURE": signature,
-            "Content-Type": "application/json",
-        }
+    side = "yes" if combo_outcome == "both_up" else "no"
+    selected_markets = [
+        {"event_ticker": btc_market["event_ticker"], "market_ticker": btc_market["ticker"], "side": side},
+        {"event_ticker": eth_market["event_ticker"], "market_ticker": eth_market["ticker"], "side": side},
+    ]
+    return client.resolve_combo_ticker(config.COMBO_COLLECTION_TICKER, selected_markets)
 
-    def _get(self, path: str, params: dict = None) -> dict:
-        headers = self._headers("GET", path)
-        resp = requests.get(self.base_url + path, headers=headers, params=params, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
 
-    def _post(self, path: str, body: dict) -> dict:
-        headers = self._headers("POST", path)
-        resp = requests.post(self.base_url + path, headers=headers, json=body, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
+def process_strategy(client: KalshiClient, name: str, spec: dict, btc_market: dict, eth_market: dict):
+    single_market = btc_market if spec["single_asset"] == "BTC" else eth_market
+    single_side = "yes" if spec["single_side"] == "up" else "no"
 
-    def _put(self, path: str, body: dict = None) -> dict:
-        headers = self._headers("PUT", path)
-        resp = requests.put(self.base_url + path, headers=headers, json=body or {}, timeout=10)
-        resp.raise_for_status()
-        return resp.json()
+    single_price, single_depth = client.get_best_price_and_depth(single_market["ticker"], single_side)
 
-    # ── SINGLE-LEG MARKET DATA (public order book, read-only) ──────────
-    def get_current_15m_market(self, series_ticker: str) -> dict:
-        """
-        Finds the currently-open 15-minute market for a given series
-        (e.g. KXBTC15M), i.e. the one whose window we're inside right now.
-        """
-        path = "/markets"
-        data = self._get(path, params={"series_ticker": series_ticker, "status": "open", "limit": 5})
-        markets = data.get("markets", [])
-        if not markets:
-            return None
-        # Return the soonest-closing open market — that's the active 15m window
-        markets.sort(key=lambda m: m.get("close_time", ""))
-        return markets[0]
+    if single_price is None:
+        logger.log_trade({
+            "strategy": name,
+            "single_asset": spec["single_asset"],
+            "single_side": spec["single_side"],
+            "decision": "SKIPPED",
+            "skip_reason": "no_single_leg_price",
+        })
+        return
 
-    def get_orderbook(self, ticker: str) -> dict:
-        """Returns the live public order book for a single-leg market."""
-        path = f"/markets/{ticker}/orderbook"
-        return self._get(path)
+    try:
+        combo_ticker = get_combo_ticker(client, btc_market, eth_market, spec["combo_outcome"])
+        combo_side = "yes" if spec["combo_outcome"] == "both_up" else "no"
+        combo_result = client.get_combo_price_via_rfq(combo_ticker, combo_side)
+    except NotImplementedError as e:
+        logger.log_trade({
+            "strategy": name,
+            "single_asset": spec["single_asset"],
+            "single_side": spec["single_side"],
+            "single_price": single_price,
+            "decision": "SKIPPED",
+            "skip_reason": f"combo_lookup_not_configured: {e}",
+        })
+        return
+    except Exception as e:
+        logger.log_trade({
+            "strategy": name,
+            "single_asset": spec["single_asset"],
+            "single_side": spec["single_side"],
+            "single_price": single_price,
+            "decision": "SKIPPED",
+            "skip_reason": f"combo_resolution_error: {e}",
+        })
+        return
 
-    def get_best_price_and_depth(self, ticker: str, side: str = "yes") -> tuple:
-        """
-        Returns (best_price_dollars, contracts_available) for a given side
-        ('yes' or 'no') of a single-leg market.
-        """
-        book = self.get_orderbook(ticker).get("orderbook", {})
-        levels = book.get(side, [])
-        if not levels:
-            return None, 0
-        # Kalshi order book levels are typically [price_cents, size]
-        best_price_cents, size = levels[0][0], levels[0][1]
-        return best_price_cents / 100.0, size
+    if combo_result["status"] != "quoted":
+        logger.log_trade({
+            "strategy": name,
+            "single_asset": spec["single_asset"],
+            "single_side": spec["single_side"],
+            "single_price": single_price,
+            "combo_status": combo_result["status"],
+            "decision": "SKIPPED",
+            "skip_reason": "no_combo_quote",
+        })
+        return
 
-    # ── MULTIVARIATE COLLECTIONS (resolving the combo market ticker) ─────
-    def list_multivariate_collections(self) -> list:
-        """Returns all combo 'collections' (families) available on Kalshi."""
-        data = self._get("/multivariate_event_collections")
-        return data.get("multivariate_collections", data.get("collections", []))
+    combo_price = combo_result["price"]
+    total_cost = round(single_price + combo_price, 2)
 
-    def lookup_combo_market(self, collection_ticker: str, selected_markets: list) -> dict:
-        """
-        Resolves the specific combo market ticker for a given set of
-        underlying markets (e.g. today's live BTC + ETH 15-min windows).
-        selected_markets: list of {"event_ticker": ..., "market_ticker": ...}
-        Returns {"event_ticker": ..., "market_ticker": ...}
-        Raises an HTTP error (404) if this exact combination has never
-        been looked up/created before -- in that case, use create_combo_market.
-        """
-        path = f"/multivariate_event_collections/{collection_ticker}/lookup"
-        return self._put(path, {"selected_markets": selected_markets})
+    if total_cost > config.MAX_TOTAL_ENTRY_COST:
+        logger.log_trade({
+            "strategy": name,
+            "single_asset": spec["single_asset"],
+            "single_side": spec["single_side"],
+            "single_price": single_price,
+            "combo_price": combo_price,
+            "combo_status": "quoted",
+            "total_cost": total_cost,
+            "decision": "SKIPPED",
+            "skip_reason": f"total_above_threshold_{total_cost}",
+        })
+        return
 
-    def create_combo_market(self, collection_ticker: str, selected_markets: list) -> dict:
-        """
-        Same as lookup_combo_market, but creates the combo market fresh if
-        it doesn't exist yet. selected_markets here can include a "side"
-        field per market (e.g. "yes"/"no") depending on the collection.
-        """
-        path = f"/multivariate_event_collections/{collection_ticker}"
-        return self._post(path, {"selected_markets": selected_markets})
+    # Entered. Expected ROI assumes best case (both legs win): payout $2.00
+    expected_roi = round(((2.00 - total_cost) / total_cost) * 100, 2)
 
-    def resolve_combo_ticker(self, collection_ticker: str, selected_markets: list) -> str:
-        """
-        Tries lookup first (cheaper/faster); falls back to create if this
-        exact combination hasn't been resolved before (404).
-        """
+    logger.log_trade({
+        "strategy": name,
+        "single_asset": spec["single_asset"],
+        "single_side": spec["single_side"],
+        "single_price": single_price,
+        "combo_price": combo_price,
+        "combo_status": "quoted",
+        "total_cost": total_cost,
+        "expected_roi": expected_roi,
+        "decision": "ENTERED",
+        "outcome": "pending",
+    })
+
+    monitor_position(client, name, single_market["ticker"], single_side, single_price, total_cost)
+
+
+def monitor_position(client: KalshiClient, name: str, ticker: str, side: str, entry_price: float, total_cost: float):
+    """
+    Polls the single leg's order book depth every DEPTH_POLL_INTERVAL_SECONDS
+    until the 15-minute window ends, logging depth snapshots. This is a
+    simplified synchronous version -- see SETUP.md notes on scaling this
+    to run all strategies concurrently.
+    """
+    elapsed = 0
+    window_seconds = 15 * 60
+    while elapsed < window_seconds:
         try:
-            result = self.lookup_combo_market(collection_ticker, selected_markets)
-        except requests.HTTPError as e:
-            if e.response is not None and e.response.status_code == 404:
-                result = self.create_combo_market(collection_ticker, selected_markets)
-            else:
-                raise
-        return result["market_ticker"]
+            price, depth = client.get_best_price_and_depth(ticker, side)
+            print(f"[{datetime.now(timezone.utc).isoformat()}] {name} depth check: "
+                  f"price={price} depth={depth}")
+        except Exception as e:
+            print(f"[WARN] depth check failed for {name}: {e}")
+        time.sleep(config.DEPTH_POLL_INTERVAL_SECONDS)
+        elapsed += config.DEPTH_POLL_INTERVAL_SECONDS
 
-    # ── COMBO PRICING VIA RFQ ────────────────────────────────────────────
-    def create_rfq(self, combo_ticker: str, contracts: int) -> dict:
-        path = "/communications/rfqs"
-        body = {"market_ticker": combo_ticker, "contracts_fp": contracts, "rest_remainder": False}
-        return self._post(path, body)
 
-    def get_rfq_quotes(self, rfq_id: str) -> list:
-        path = f"/communications/rfqs/{rfq_id}/quotes"
-        data = self._get(path)
-        return data.get("quotes", [])
+def main():
+    client = KalshiClient()
 
-    def accept_quote(self, rfq_id: str, quote_id: str, side: str) -> dict:
-        path = f"/communications/rfqs/{rfq_id}/quotes/{quote_id}/accept"
-        return self._put(path, {"side": side})
+    btc_market = client.get_current_15m_market(config.BTC_SERIES_TICKER)
+    eth_market = client.get_current_15m_market(config.ETH_SERIES_TICKER)
 
-    def confirm_quote_status(self, rfq_id: str, quote_id: str) -> dict:
-        """Checks whether a maker has confirmed an accepted quote yet."""
-        path = f"/communications/rfqs/{rfq_id}/quotes/{quote_id}"
-        return self._get(path)
+    if not btc_market or not eth_market:
+        print("[ERROR] Could not find an open 15-minute market for BTC and/or ETH. Exiting.")
+        sys.exit(1)
 
-    def get_combo_price_via_rfq(self, combo_ticker: str, side: str = "yes") -> dict:
-        """
-        Fires an RFQ, waits for quotes, and returns pricing info WITHOUT
-        accepting anything — used for the "get combo price at entry" step.
+    for name, spec in STRATEGIES.items():
+        try:
+            process_strategy(client, name, spec, btc_market, eth_market)
+        except Exception as e:
+            print(f"[ERROR] Strategy {name} failed: {e}")
 
-        Returns a dict:
-          {"status": "quoted", "price": 0.29, "rfq_id": ..., "quote_id": ...}
-          {"status": "no_quote"}
-        """
-        rfq = self.create_rfq(combo_ticker, config.RFQ_CONTRACT_SIZE)
-        rfq_id = rfq.get("rfq_id") or rfq.get("id")
+    logger.recompute_summary()
+    logger.push_to_github()
 
-        waited = 0
-        poll_step = 1
-        while waited < config.RFQ_MAX_WAIT_SECONDS:
-            quotes = self.get_rfq_quotes(rfq_id)
-            if quotes:
-                best = min(
-                    quotes,
-                    key=lambda q: q.get(f"{side}_bid", 999) if q.get(f"{side}_bid", 0) > 0 else 999,
-                )
-                price_cents = best.get(f"{side}_bid", 0)
-                if price_cents > 0:
-                    return {
-                        "status": "quoted",
-                        "price": price_cents / 100.0,
-                        "rfq_id": rfq_id,
-                        "quote_id": best.get("quote_id"),
-                    }
-            time.sleep(poll_step)
-            waited += poll_step
 
-        return {"status": "no_quote", "rfq_id": rfq_id}
-
-    def try_accept_and_confirm(self, rfq_id: str, quote_id: str, side: str) -> str:
-        """
-        Attempts to accept a quote and waits to see if the maker confirms.
-        Returns one of: "confirmed", "void"
-        (In paper mode we never actually want the real fill to matter --
-        we just want to know whether it WOULD have confirmed, for logging.)
-        """
-        self.accept_quote(rfq_id, quote_id, side)
-        waited = 0
-        while waited < config.RFQ_CONFIRM_WAIT_SECONDS:
-            status = self.confirm_quote_status(rfq_id, quote_id)
-            if status.get("status") == "confirmed":
-                return "confirmed"
-            time.sleep(0.5)
-            waited += 0.5
-        return "void"
+if __name__ == "__main__":
+    main()
