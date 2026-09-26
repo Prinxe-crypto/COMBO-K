@@ -5,6 +5,7 @@ Handles everything related to talking to Kalshi's real API:
   - Signing requests (Kalshi requires every request to be cryptographically
     signed with your private key — this proves it's really you).
   - Fetching market prices and order books for the single-leg BTC/ETH markets.
+  - Resolving combo (multivariate) market tickers.
   - Firing RFQs (Request for Quote) to get a price for the combo leg.
 
 You should not need to edit this file. Everything you'd want to change
@@ -121,6 +122,47 @@ class KalshiClient:
         best_price_cents, size = levels[0][0], levels[0][1]
         return best_price_cents / 100.0, size
 
+    # ── MULTIVARIATE COLLECTIONS (resolving the combo market ticker) ─────
+    def list_multivariate_collections(self) -> list:
+        """Returns all combo 'collections' (families) available on Kalshi."""
+        data = self._get("/multivariate_event_collections")
+        return data.get("multivariate_collections", data.get("collections", []))
+
+    def lookup_combo_market(self, collection_ticker: str, selected_markets: list) -> dict:
+        """
+        Resolves the specific combo market ticker for a given set of
+        underlying markets (e.g. today's live BTC + ETH 15-min windows).
+        selected_markets: list of {"event_ticker": ..., "market_ticker": ...}
+        Returns {"event_ticker": ..., "market_ticker": ...}
+        Raises an HTTP error (404) if this exact combination has never
+        been looked up/created before -- in that case, use create_combo_market.
+        """
+        path = f"/multivariate_event_collections/{collection_ticker}/lookup"
+        return self._put(path, {"selected_markets": selected_markets})
+
+    def create_combo_market(self, collection_ticker: str, selected_markets: list) -> dict:
+        """
+        Same as lookup_combo_market, but creates the combo market fresh if
+        it doesn't exist yet. selected_markets here can include a "side"
+        field per market (e.g. "yes"/"no") depending on the collection.
+        """
+        path = f"/multivariate_event_collections/{collection_ticker}"
+        return self._post(path, {"selected_markets": selected_markets})
+
+    def resolve_combo_ticker(self, collection_ticker: str, selected_markets: list) -> str:
+        """
+        Tries lookup first (cheaper/faster); falls back to create if this
+        exact combination hasn't been resolved before (404).
+        """
+        try:
+            result = self.lookup_combo_market(collection_ticker, selected_markets)
+        except requests.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                result = self.create_combo_market(collection_ticker, selected_markets)
+            else:
+                raise
+        return result["market_ticker"]
+
     # ── COMBO PRICING VIA RFQ ────────────────────────────────────────────
     def create_rfq(self, combo_ticker: str, contracts: int) -> dict:
         path = "/communications/rfqs"
@@ -156,38 +198,4 @@ class KalshiClient:
         waited = 0
         poll_step = 1
         while waited < config.RFQ_MAX_WAIT_SECONDS:
-            quotes = self.get_rfq_quotes(rfq_id)
-            if quotes:
-                best = min(
-                    quotes,
-                    key=lambda q: q.get(f"{side}_bid", 999) if q.get(f"{side}_bid", 0) > 0 else 999,
-                )
-                price_cents = best.get(f"{side}_bid", 0)
-                if price_cents > 0:
-                    return {
-                        "status": "quoted",
-                        "price": price_cents / 100.0,
-                        "rfq_id": rfq_id,
-                        "quote_id": best.get("quote_id"),
-                    }
-            time.sleep(poll_step)
-            waited += poll_step
-
-        return {"status": "no_quote", "rfq_id": rfq_id}
-
-    def try_accept_and_confirm(self, rfq_id: str, quote_id: str, side: str) -> str:
-        """
-        Attempts to accept a quote and waits to see if the maker confirms.
-        Returns one of: "confirmed", "void"
-        (In paper mode we never actually want the real fill to matter --
-        we just want to know whether it WOULD have confirmed, for logging.)
-        """
-        self.accept_quote(rfq_id, quote_id, side)
-        waited = 0
-        while waited < config.RFQ_CONFIRM_WAIT_SECONDS:
-            status = self.confirm_quote_status(rfq_id, quote_id)
-            if status.get("status") == "confirmed":
-                return "confirmed"
-            time.sleep(0.5)
-            waited += 0.5
-        return "void"
+            quotes = self.get_rfq_quotes(r
