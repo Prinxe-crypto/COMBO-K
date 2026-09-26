@@ -30,6 +30,13 @@ API_BASE_URL = "https://api.elections.kalshi.com/trade-api/v2"
 BTC_SERIES_TICKER = "KXBTC15M"   # Bitcoin 15-minute markets
 ETH_SERIES_TICKER = "KXETH15M"   # Ethereum 15-minute markets
 
+# ── COMBO COLLECTION ─────────────────────────────────────────────────────
+# The fixed "family name" for the BTC+ETH 15-min combo on Kalshi. This is
+# NOT a specific market ticker -- it's used to look up/create the specific
+# combo market for today's live windows. Run find_collection_ticker.py
+# once to discover this value, then paste it here.
+COMBO_COLLECTION_TICKER = "PASTE_COLLECTION_TICKER_HERE"
+
 # ── ENTRY RULES ──────────────────────────────────────────────────────────
 # Only enter a trade if (single leg price + combo leg price) is at or
 # below this amount. Otherwise the trade is SKIPPED (but still logged).
