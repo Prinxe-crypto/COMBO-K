@@ -124,10 +124,21 @@ class KalshiClient:
 
     # ── MULTIVARIATE COLLECTIONS (resolving the combo market ticker) ─────
     def list_multivariate_collections(self) -> list:
-        """Returns all combo 'collections' (families) available on Kalshi."""
-        data = self._get("/multivariate_event_collections")
-        # Kalshi's real field name is "multivariate_contracts" (confirmed from docs)
-        return data.get("multivariate_contracts", [])
+        """
+        Returns ALL combo 'collections' (families) available on Kalshi,
+        following pagination via the cursor field until exhausted.
+        """
+        all_collections = []
+        cursor = None
+        while True:
+            params = {"cursor": cursor} if cursor else None
+            data = self._get("/multivariate_event_collections", params=params)
+            # Kalshi's real field name is "multivariate_contracts" (confirmed from docs)
+            all_collections.extend(data.get("multivariate_contracts", []))
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        return all_collections
 
     def lookup_combo_market(self, collection_ticker: str, selected_markets: list) -> dict:
         """
