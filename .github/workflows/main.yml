@@ -1,35 +1,49 @@
-name: Trigger Kalshi Daemon via API
+# daemon.yml
+# ----------
+# This file tells GitHub: "run daemon.py automatically every 15 minutes,
+# on your own servers, forever." This replaces cron and replaces needing
+# any computer or tablet on at all.
+#
+# You should not need to edit this file. Just make sure the secrets
+# referenced below (KALSHI_API_KEY_ID, KALSHI_PRIVATE_KEY_PEM) are set
+# in your repo's Settings -> Secrets and variables -> Actions.
+
+name: Kalshi 15-Min Paper Trading Daemon
 
 on:
-  repository_dispatch:
-    types: [run-kalshi-daemon]
-  workflow_dispatch:
+  schedule:
+    # Runs at :00, :15, :30, :45 past every hour, every day.
+    # NOTE: GitHub's scheduler can lag a few minutes under heavy load --
+    # this is a known GitHub limitation, not a bug in this project.
+    - cron: "*/15 * * * *"
+  workflow_dispatch: {}  # lets you also trigger a run manually from the GitHub website
 
 jobs:
-  run-script:
+  run-daemon:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      
+    timeout-minutes: 16   # slightly more than one 15-min cycle, as a safety cap
+
     steps:
-      - name: Checkout Code
+      - name: Check out the repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.11"
 
-      - name: Install Dependencies
-        run: pip install requests pandas
+      - name: Install dependencies
+        run: pip install -r requirements.txt
 
-      - name: Execute Daemon
-        run: python daemon.py
-
-      - name: Commit & Push Updated CSV Log
+      - name: Configure git identity for auto-commits
         run: |
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add kalshi_flexible_paper_log.csv || true
-          git commit -m "chore: update paper trading log [skip ci]" || echo "No changes to commit"
-          git push
+          git config --global user.name "kalshi-daemon-bot"
+          git config --global user.email "actions@github.com"
+
+      - name: Run the daemon
+        env:
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+          KALSHI_PRIVATE_KEY_PEM: ${{ secrets.KALSHI_PRIVATE_KEY_PEM }}
+        run: python daemon.py
