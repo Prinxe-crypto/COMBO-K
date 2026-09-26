@@ -126,7 +126,8 @@ class KalshiClient:
     def list_multivariate_collections(self) -> list:
         """Returns all combo 'collections' (families) available on Kalshi."""
         data = self._get("/multivariate_event_collections")
-        return data.get("multivariate_collections", data.get("collections", []))
+        # Kalshi's real field name is "multivariate_contracts" (confirmed from docs)
+        return data.get("multivariate_contracts", [])
 
     def lookup_combo_market(self, collection_ticker: str, selected_markets: list) -> dict:
         """
