@@ -1,4 +1,4 @@
-"""
+⁷"""
 find_collection_ticker.py
 --------------------------
 RUN THIS ONCE, MANUALLY, to find the exact "collection ticker" name for
@@ -46,7 +46,7 @@ def main():
     print("\n" + "=" * 60)
     print("Checking /events/multivariate (a different endpoint)...")
     print("=" * 60 + "\n")
-    events = client.list_multivariate_events()
+    events = client.list_multivariate_collections()
     print(f"Total multivariate events found: {len(events)}\n")
 
     event_matches = []
