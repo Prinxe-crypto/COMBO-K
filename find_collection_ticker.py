@@ -17,6 +17,16 @@ from kalshi_client import KalshiClient
 def main():
     client = KalshiClient()
     collections = client.list_multivariate_collections()
+
+    print(f"\nFound {len(collections)} collection(s):\n")
+    for c in collections:
+        print("-" * 50)
+        print(f"collection_ticker : {c.get('collection_ticker')}")
+        print(f"title             : {c.get('title')}")
+        print(f"series_ticker     : {c.get('series_ticker')}")
+        print(f"description       : {c.get('description')}")
+
+    print("\n\nFULL RAW JSON (in case the above is empty or unclear):\n")
     print(json.dumps(collections, indent=2))
 
 if __name__ == "__main__":
