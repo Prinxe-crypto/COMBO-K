@@ -1,0 +1,40 @@
+# find_collection_ticker.yml
+# ---------------------------
+# A ONE-OFF, manually-triggered workflow (not scheduled) that runs
+# find_collection_ticker.py and prints the results to the run log.
+#
+# HOW TO USE:
+# 1. Go to your repo's Actions tab.
+# 2. Find "Find Combo Collection Ticker" in the list on the left.
+# 3. Tap "Run workflow".
+# 4. Once it finishes, tap into the run and expand the "Run the lookup
+#    script" step -- the full list of collections will be printed there.
+# 5. Find the one that looks like the BTC/ETH crypto 15-min combo, copy
+#    its "collection_ticker" value, and paste it into config.py as
+#    COMBO_COLLECTION_TICKER.
+
+name: Find Combo Collection Ticker
+
+on:
+  workflow_dispatch: {}
+
+jobs:
+  find-ticker:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repo
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run the lookup script
+        env:
+          KALSHI_API_KEY_ID: ${{ secrets.KALSHI_API_KEY_ID }}
+          KALSHI_PRIVATE_KEY_PEM: ${{ secrets.KALSHI_PRIVATE_KEY_PEM }}
+        run: python find_collection_ticker.py
