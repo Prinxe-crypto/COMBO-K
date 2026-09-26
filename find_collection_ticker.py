@@ -4,9 +4,8 @@ find_collection_ticker.py
 RUN THIS ONCE, MANUALLY, to find the exact "collection ticker" name for
 the BTC+ETH 15-minute combo family on Kalshi.
 
-This filters the full list of Kalshi's combo collections down to only
-ones that look crypto-related, so we don't have to scroll through 1000+
-sports prop-bet collections to find it.
+This checks both the collections listing and the separate multivariate
+events endpoint, filtering both down to crypto-related matches.
 """
 
 import json
@@ -39,8 +38,39 @@ def main():
         print(f"description       : {c.get('description')}")
 
     if not matches:
-        print("No matches found. Printing first 5 raw entries so we can see the naming pattern used:\n")
+        print("No matches found in collections. Printing first 5 raw entries so we can see the naming pattern used:\n")
         print(json.dumps(collections[:5], indent=2))
+
+    # Also check the separate /events/multivariate endpoint, in case crypto
+    # combos live there instead of in the collections listing.
+    print("\n" + "=" * 60)
+    print("Checking /events/multivariate (a different endpoint)...")
+    print("=" * 60 + "\n")
+    events = client.list_multivariate_events()
+    print(f"Total multivariate events found: {len(events)}\n")
+
+    event_matches = []
+    for e in events:
+        haystack = " ".join([
+            str(e.get("event_ticker", "")),
+            str(e.get("title", "")),
+            str(e.get("series_ticker", "")),
+            str(e.get("category", "")),
+        ]).upper()
+        if any(k in haystack for k in KEYWORDS):
+            event_matches.append(e)
+
+    print(f"Crypto/BTC/ETH-related event matches: {len(event_matches)}\n")
+    for e in event_matches:
+        print("-" * 50)
+        print(f"event_ticker  : {e.get('event_ticker')}")
+        print(f"title         : {e.get('title')}")
+        print(f"series_ticker : {e.get('series_ticker')}")
+        print(f"category      : {e.get('category')}")
+
+    if not event_matches:
+        print("No matches here either. Printing first 3 raw entries:\n")
+        print(json.dumps(events[:3], indent=2))
 
 if __name__ == "__main__":
     main()
