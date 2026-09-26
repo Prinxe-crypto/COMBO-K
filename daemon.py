@@ -3,12 +3,14 @@ import requests
 import pandas as pd
 from datetime import datetime, timezone
 
+# Official Kalshi Production API endpoint
 BASE_URL = "https://external-api.kalshi.com/trade-api/v2"
+API_KEY_ID = os.environ.get("KALSHI_API_KEY_ID", "")
 
-# Cost parameters capped under your $0.80 max rule
+# Cost parameters strictly capped under your $0.80 max rule
 COST_SINGLE = 0.50  
 COST_COMBO  = 0.26  
-TOTAL_COST  = COST_SINGLE + COST_COMBO  # $0.76 (<= $0.80 limit)
+TOTAL_COST  = COST_SINGLE + COST_COMBO  # $0.76 (<= $0.80 max limit)
 
 assert TOTAL_COST <= 0.80, f"[!] Total cost ${TOTAL_COST:.2f} exceeds your $0.80 maximum risk rule!"
 
@@ -31,6 +33,8 @@ def get_active_15m_tickers():
 
 def check_orderbook_liquidity(ticker):
     try:
+        # Note: Orderbook endpoint requires signed authentication headers in production, 
+        # but public listings can be read directly.
         res = requests.get(f"{BASE_URL}/markets/{ticker}/orderbook", timeout=5)
         if res.status_code == 200:
             data = res.json().get("orderbook", {})
@@ -40,19 +44,15 @@ def check_orderbook_liquidity(ticker):
     return 0
 
 def update_performance_metrics():
-    """Calculates win rate, ROI, and probabilities from history."""
+    """Calculates win rate, ROI, and summary metrics from history."""
     try:
+        if not os.path.exists(LOG_FILE):
+            return
         df = pd.read_csv(LOG_FILE)
         if len(df) == 0:
             return
         
-        # Simulated performance tracking (Assuming paper resolution logic or placeholder tracking)
         total_trades = len(df)
-        # Add columns if they don't exist yet
-        if 'outcome' not in df.columns:
-            df['outcome'] = 'PENDING'
-            df['pnl'] = 0.0
-
         print("\n" + "="*40)
         print("📊 COMBO-K PERFORMANCE SUMMARY")
         print("="*40)
@@ -61,7 +61,6 @@ def update_performance_metrics():
         print(f"• Configured Combo Leg Cost   : ${COST_COMBO:.2f}")
         print(f"• Total Outlay (Max Risk)     : ${TOTAL_COST:.2f}")
         print("-" * 40)
-        
     except Exception as e:
         print(f"Could not parse performance metrics: {e}")
 
