@@ -1,0 +1,13 @@
+timestamp_utc,strategy,single_asset,single_side,single_price,combo_price,combo_status,total_cost,expected_roi,decision,skip_reason,stop_loss_level,outcome,net_pnl
+2026-09-27T07:46:36.744936+00:00,P1,BTC,up,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:36.826824+00:00,P2,BTC,up,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:36.896022+00:00,P3,BTC,down,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:36.986014+00:00,P4,BTC,down,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:37.058580+00:00,P5,ETH,up,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:37.124592+00:00,P6,ETH,up,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:37.301588+00:00,P7,ETH,down,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:37.373254+00:00,P8,ETH,down,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:37.433798+00:00,S1,ETH,down,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:37.496153+00:00,S2,BTC,up,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:37.625825+00:00,S3,ETH,up,,,,,,SKIPPED,no_single_leg_price,,,
+2026-09-27T07:46:37.690528+00:00,S4,BTC,down,,,,,,SKIPPED,no_single_leg_price,,,
