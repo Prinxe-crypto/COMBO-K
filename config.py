@@ -35,7 +35,7 @@ ETH_SERIES_TICKER = "KXETH15M"   # Ethereum 15-minute markets
 # NOT a specific market ticker -- it's used to look up/create the specific
 # combo market for today's live windows. Run find_collection_ticker.py
 # once to discover this value, then paste it here.
-COMBO_COLLECTION_TICKER = "PASTE_COLLECTION_TICKER_HERE"
+COMBO_COLLECTION_TICKER = "KXMVECROSSCATEGORY-SHARD1-R"
 
 # ── ENTRY RULES ──────────────────────────────────────────────────────────
 # Only enter a trade if (single leg price + combo leg price) is at or
