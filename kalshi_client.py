@@ -109,18 +109,24 @@ class KalshiClient:
         path = f"/markets/{ticker}/orderbook"
         return self._get(path)
 
-    def get_best_price_and_depth(self, ticker: str, side: str = "yes") -> tuple:
+      def get_best_price_and_depth(self, ticker: str, side: str = "yes") -> tuple:
         """
         Returns (best_price_dollars, contracts_available) for a given side
         ('yes' or 'no') of a single-leg market.
+
+        Kalshi's real response format: {"orderbook_fp": {"yes_dollars": [...],
+        "no_dollars": [...]}}, where each entry is [price_dollars_string,
+        count_fp_string], sorted ASCENDING by price -- so the best (highest)
+        bid is the LAST entry in the list, not the first.
         """
-        book = self.get_orderbook(ticker).get("orderbook", {})
-        levels = book.get(side, [])
+        data = self.get_orderbook(ticker)
+        book = data.get("orderbook_fp", data.get("orderbook", {}))
+        key = f"{side}_dollars" if f"{side}_dollars" in book else side
+        levels = book.get(key, [])
         if not levels:
             return None, 0
-        # Kalshi order book levels are typically [price_cents, size]
-        best_price_cents, size = levels[0][0], levels[0][1]
-        return best_price_cents / 100.0, size
+        best_price_str, size_str = levels[-1][0], levels[-1][1]
+        return float(best_price_str), float(size_str)
 
     # ── MULTIVARIATE COLLECTIONS (resolving the combo market ticker) ─────
     def list_multivariate_collections(self) -> list:
