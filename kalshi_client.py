@@ -5,7 +5,6 @@ Handles everything related to talking to Kalshi's real API:
   - Signing requests (Kalshi requires every request to be cryptographically
     signed with your private key — this proves it's really you).
   - Fetching market prices and order books for the single-leg BTC/ETH markets.
-  - Resolving combo (multivariate) market tickers.
   - Firing RFQs (Request for Quote) to get a price for the combo leg.
 
 You should not need to edit this file. Everything you'd want to change
@@ -36,15 +35,10 @@ class KalshiClient:
             )
         self.private_key = self._load_private_key(config.KALSHI_PRIVATE_KEY_PEM)
 
-    # ── AUTH ──────────────────────────────────────────────────────────
     def _load_private_key(self, pem_text: str):
         return serialization.load_pem_private_key(pem_text.encode("utf-8"), password=None)
 
     def _sign(self, timestamp_ms: str, method: str, path: str) -> str:
-        """
-        Kalshi requires a signature over: timestamp + method + path
-        (NOT the full URL, and NOT query parameters).
-        """
         message = f"{timestamp_ms}{method}{path}".encode("utf-8")
         signature = self.private_key.sign(
             message,
@@ -58,10 +52,6 @@ class KalshiClient:
 
     def _headers(self, method: str, path: str) -> dict:
         timestamp_ms = str(int(time.time() * 1000))
-        # Kalshi signs the FULL path including "/trade-api/v2", not just
-        # the part after it -- e.g. "/trade-api/v2/markets", not "/markets".
-        # self.base_url already ends in "/trade-api/v2", so we rebuild the
-        # full path here for signing purposes only.
         full_path_for_signing = "/trade-api/v2" + path
         signature = self._sign(timestamp_ms, method, full_path_for_signing)
         return {
@@ -89,36 +79,20 @@ class KalshiClient:
         resp.raise_for_status()
         return resp.json()
 
-    # ── SINGLE-LEG MARKET DATA (public order book, read-only) ──────────
     def get_current_15m_market(self, series_ticker: str) -> dict:
-        """
-        Finds the currently-open 15-minute market for a given series
-        (e.g. KXBTC15M), i.e. the one whose window we're inside right now.
-        """
         path = "/markets"
         data = self._get(path, params={"series_ticker": series_ticker, "status": "open", "limit": 5})
         markets = data.get("markets", [])
         if not markets:
             return None
-        # Return the soonest-closing open market — that's the active 15m window
         markets.sort(key=lambda m: m.get("close_time", ""))
         return markets[0]
 
     def get_orderbook(self, ticker: str) -> dict:
-        """Returns the live public order book for a single-leg market."""
         path = f"/markets/{ticker}/orderbook"
         return self._get(path)
 
-      def get_best_price_and_depth(self, ticker: str, side: str = "yes") -> tuple:
-        """
-        Returns (best_price_dollars, contracts_available) for a given side
-        ('yes' or 'no') of a single-leg market.
-
-        Kalshi's real response format: {"orderbook_fp": {"yes_dollars": [...],
-        "no_dollars": [...]}}, where each entry is [price_dollars_string,
-        count_fp_string], sorted ASCENDING by price -- so the best (highest)
-        bid is the LAST entry in the list, not the first.
-        """
+    def get_best_price_and_depth(self, ticker: str, side: str = "yes") -> tuple:
         data = self.get_orderbook(ticker)
         book = data.get("orderbook_fp", data.get("orderbook", {}))
         key = f"{side}_dollars" if f"{side}_dollars" in book else side
@@ -128,18 +102,24 @@ class KalshiClient:
         best_price_str, size_str = levels[-1][0], levels[-1][1]
         return float(best_price_str), float(size_str)
 
-    # ── MULTIVARIATE COLLECTIONS (resolving the combo market ticker) ─────
+    def list_multivariate_events(self) -> list:
+        all_events = []
+        cursor = None
+        while True:
+            params = {"cursor": cursor} if cursor else None
+            data = self._get("/events/multivariate", params=params)
+            all_events.extend(data.get("events", []))
+            cursor = data.get("cursor")
+            if not cursor:
+                break
+        return all_events
+
     def list_multivariate_collections(self) -> list:
-        """
-        Returns ALL combo 'collections' (families) available on Kalshi,
-        following pagination via the cursor field until exhausted.
-        """
         all_collections = []
         cursor = None
         while True:
             params = {"cursor": cursor} if cursor else None
             data = self._get("/multivariate_event_collections", params=params)
-            # Kalshi's real field name is "multivariate_contracts" (confirmed from docs)
             all_collections.extend(data.get("multivariate_contracts", []))
             cursor = data.get("cursor")
             if not cursor:
@@ -147,31 +127,14 @@ class KalshiClient:
         return all_collections
 
     def lookup_combo_market(self, collection_ticker: str, selected_markets: list) -> dict:
-        """
-        Resolves the specific combo market ticker for a given set of
-        underlying markets (e.g. today's live BTC + ETH 15-min windows).
-        selected_markets: list of {"event_ticker": ..., "market_ticker": ...}
-        Returns {"event_ticker": ..., "market_ticker": ...}
-        Raises an HTTP error (404) if this exact combination has never
-        been looked up/created before -- in that case, use create_combo_market.
-        """
         path = f"/multivariate_event_collections/{collection_ticker}/lookup"
         return self._put(path, {"selected_markets": selected_markets})
 
     def create_combo_market(self, collection_ticker: str, selected_markets: list) -> dict:
-        """
-        Same as lookup_combo_market, but creates the combo market fresh if
-        it doesn't exist yet. selected_markets here can include a "side"
-        field per market (e.g. "yes"/"no") depending on the collection.
-        """
         path = f"/multivariate_event_collections/{collection_ticker}"
-        return self._post(path, {"selected_markets": selected_markets})
+        return self._post(path, {"selected_markets": selected_markets, "with_market_payload": True})
 
     def resolve_combo_ticker(self, collection_ticker: str, selected_markets: list) -> str:
-        """
-        Tries lookup first (cheaper/faster); falls back to create if this
-        exact combination hasn't been resolved before (404).
-        """
         try:
             result = self.lookup_combo_market(collection_ticker, selected_markets)
         except requests.HTTPError as e:
@@ -181,7 +144,6 @@ class KalshiClient:
                 raise
         return result["market_ticker"]
 
-    # ── COMBO PRICING VIA RFQ ────────────────────────────────────────────
     def create_rfq(self, combo_ticker: str, contracts: int) -> dict:
         path = "/communications/rfqs"
         body = {"market_ticker": combo_ticker, "contracts_fp": contracts, "rest_remainder": False}
@@ -197,22 +159,12 @@ class KalshiClient:
         return self._put(path, {"side": side})
 
     def confirm_quote_status(self, rfq_id: str, quote_id: str) -> dict:
-        """Checks whether a maker has confirmed an accepted quote yet."""
         path = f"/communications/rfqs/{rfq_id}/quotes/{quote_id}"
         return self._get(path)
 
     def get_combo_price_via_rfq(self, combo_ticker: str, side: str = "yes") -> dict:
-        """
-        Fires an RFQ, waits for quotes, and returns pricing info WITHOUT
-        accepting anything — used for the "get combo price at entry" step.
-
-        Returns a dict:
-          {"status": "quoted", "price": 0.29, "rfq_id": ..., "quote_id": ...}
-          {"status": "no_quote"}
-        """
         rfq = self.create_rfq(combo_ticker, config.RFQ_CONTRACT_SIZE)
         rfq_id = rfq.get("rfq_id") or rfq.get("id")
-
         waited = 0
         poll_step = 1
         while waited < config.RFQ_MAX_WAIT_SECONDS:
@@ -232,16 +184,9 @@ class KalshiClient:
                     }
             time.sleep(poll_step)
             waited += poll_step
-
         return {"status": "no_quote", "rfq_id": rfq_id}
 
     def try_accept_and_confirm(self, rfq_id: str, quote_id: str, side: str) -> str:
-        """
-        Attempts to accept a quote and waits to see if the maker confirms.
-        Returns one of: "confirmed", "void"
-        (In paper mode we never actually want the real fill to matter --
-        we just want to know whether it WOULD have confirmed, for logging.)
-        """
         self.accept_quote(rfq_id, quote_id, side)
         waited = 0
         while waited < config.RFQ_CONFIRM_WAIT_SECONDS:
