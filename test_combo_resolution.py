@@ -46,11 +46,13 @@ def main():
 
     print(f"Trying CREATE against collection: {TEST_COLLECTION_TICKER}\n")
     try:
-        result = client.create_combo_market(TEST_COLLECTION_TICKER, selected_markets)
+        body = {"selected_markets": selected_markets, "with_market_payload": True}
+        result = client._post(f"/multivariate_event_collections/{TEST_COLLECTION_TICKER}", body)
         print("CREATE SUCCEEDED:")
         print(json.dumps(result, indent=2))
     except Exception as e:
         print(f"CREATE also failed: {e}")
+        # Try to print the raw response body for more detail, if available
         if hasattr(e, "response") and e.response is not None:
             print("\nRaw error response body:")
             print(e.response.text)
